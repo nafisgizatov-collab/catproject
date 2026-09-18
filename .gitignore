@@ -1,0 +1,9 @@
+tools/
+runtime/
+node_modules/
+.env
+.tuya-data/
+.venv-miio/
+data/
+esp/secrets.yaml
+__pycache__/
