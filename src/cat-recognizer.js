@@ -24,6 +24,8 @@ const FAST_GPU_SCORE_MINIMUM = numberConfig("CAT_FAST_GPU_SCORE_MINIMUM", 0.9, {
 const FAST_GPU_ORANGE_RATIO_MINIMUM = numberConfig("CAT_FAST_GPU_ORANGE_RATIO_MINIMUM", 0.18, { min: 0, max: 1 });
 const FAST_GPU_NIGHT_COLOURED_RATIO_MAXIMUM = numberConfig("CAT_FAST_GPU_NIGHT_COLOURED_RATIO_MAXIMUM", 0.12, { min: 0, max: 1 });
 const FAST_GPU_NEAR_DOOR_X = numberConfig("CAT_FAST_GPU_NEAR_DOOR_X", 0.42, { min: 0, max: 1 });
+const INDOOR_ORANGE_RATIO_MINIMUM = numberConfig("CAT_INDOOR_ORANGE_RATIO_MINIMUM", 0.18, { min: 0, max: 1 });
+const INDOOR_CHAIR_CONTOUR_MAX_FRACTION = numberConfig("CAT_INDOOR_CHAIR_CONTOUR_MAX_FRACTION", 0.01, { min: 0.001, max: 0.1 });
 const DETECTOR_DEVICE = config("CAT_DETECTOR_DEVICE", "cpu");
 const SEGMENTER_DEVICE = config("CAT_SEGMENTER_DEVICE", "cpu");
 let detectorPromise;
@@ -66,47 +68,32 @@ function rgbToHsv(red, green, blue) {
 }
 
 function orangeChairContour(image) {
-  // The grey armchair is fixed in the lower-right of the indoor view.  The
-  // cat's curled coat produces a large connected orange silhouette there;
-  // a rectangle by itself is deliberately never considered evidence.
+  // A genuine sleeping cat creates compact orange contours on the fixed lower-right chair.
+  // A brightly lit empty chair can look warm-coloured too, but fills a much larger area.
   const left = Math.floor(image.width * 0.62);
   const top = Math.floor(image.height * 0.57);
   const width = image.width - left;
   const height = image.height - top;
   const mask = new Uint8Array(width * height);
-  for (let y = 0; y < height; y += 1) {
-    for (let x = 0; x < width; x += 1) {
-      const offset = ((top + y) * image.width + left + x) * image.channels;
-      const { hue, saturation, value } = rgbToHsv(
-        image.data[offset], image.data[offset + 1], image.data[offset + 2],
-      );
-      if (hue >= 12 && hue <= 48 && saturation >= 0.25 && value >= 0.18) mask[y * width + x] = 1;
-    }
+  for (let y = 0; y < height; y += 1) for (let x = 0; x < width; x += 1) {
+    const offset = ((top + y) * image.width + left + x) * image.channels;
+    const { hue, saturation, value } = rgbToHsv(image.data[offset], image.data[offset + 1], image.data[offset + 2]);
+    if (hue >= 12 && hue <= 48 && saturation >= 0.25 && value >= 0.18) mask[y * width + x] = 1;
   }
-
   const visited = new Uint8Array(mask.length);
   let best = null;
   for (let start = 0; start < mask.length; start += 1) {
     if (!mask[start] || visited[start]) continue;
-    const queue = [start];
-    visited[start] = 1;
-    let pixels = 0;
-    let xmin = width; let ymin = height; let xmax = -1; let ymax = -1;
+    const queue = [start]; visited[start] = 1;
+    let pixels = 0; let xmin = width; let ymin = height; let xmax = -1; let ymax = -1;
     for (let index = 0; index < queue.length; index += 1) {
-      const point = queue[index];
-      const x = point % width;
-      const y = Math.floor(point / width);
-      pixels += 1;
-      xmin = Math.min(xmin, x); xmax = Math.max(xmax, x);
-      ymin = Math.min(ymin, y); ymax = Math.max(ymax, y);
-      for (let dy = -1; dy <= 1; dy += 1) {
-        for (let dx = -1; dx <= 1; dx += 1) {
-          if (dx === 0 && dy === 0) continue;
-          const nextX = x + dx; const nextY = y + dy;
-          if (nextX < 0 || nextY < 0 || nextX >= width || nextY >= height) continue;
-          const next = nextY * width + nextX;
-          if (mask[next] && !visited[next]) { visited[next] = 1; queue.push(next); }
-        }
+      const point = queue[index]; const x = point % width; const y = Math.floor(point / width);
+      pixels += 1; xmin = Math.min(xmin, x); xmax = Math.max(xmax, x); ymin = Math.min(ymin, y); ymax = Math.max(ymax, y);
+      for (let dy = -1; dy <= 1; dy += 1) for (let dx = -1; dx <= 1; dx += 1) {
+        const nextX = x + dx; const nextY = y + dy;
+        if ((dx === 0 && dy === 0) || nextX < 0 || nextY < 0 || nextX >= width || nextY >= height) continue;
+        const next = nextY * width + nextX;
+        if (mask[next] && !visited[next]) { visited[next] = 1; queue.push(next); }
       }
     }
     if (!best || pixels > best.pixels) best = { pixels, xmin, ymin, xmax, ymax };
@@ -114,19 +101,11 @@ function orangeChairContour(image) {
   if (!best) return null;
   const contourWidth = best.xmax - best.xmin + 1;
   const contourHeight = best.ymax - best.ymin + 1;
-  // Small orange objects and isolated reflections are rejected.  The sleeping
-  // cat reference has a broad, continuous contour far above these limits.
-  if (best.pixels < 900 || contourWidth < 40 || contourHeight < 35) return null;
+  const fraction = best.pixels / (image.width * image.height);
+  if (best.pixels < 300 || contourWidth < 20 || contourHeight < 20 || fraction > INDOOR_CHAIR_CONTOUR_MAX_FRACTION) return null;
   return {
-    source: "chair-orange-contour",
-    score: 1,
-    pixels: best.pixels,
-    box: {
-      xmin: left + best.xmin,
-      ymin: top + best.ymin,
-      xmax: left + best.xmax + 1,
-      ymax: top + best.ymax + 1,
-    },
+    source: "chair-orange-contour", score: 1, pixels: best.pixels,
+    box: { xmin: left + best.xmin, ymin: top + best.ymin, xmax: left + best.xmax + 1, ymax: top + best.ymax + 1 },
   };
 }
 
@@ -624,21 +603,25 @@ export async function recognizeOrangeCat(imagePath, { allowDoorOrangeContour = f
 export async function recognizeAnyIndoorCat(imagePath) {
   const decoded = jpeg.decode(await readFile(imagePath), { useTArray: true });
   const image = new RawImage(decoded.data, decoded.width, decoded.height, 4);
-  // Transformers preprocessing may reuse the image buffer, so preserve this
-  // colour-contour measurement before handing the image to either model.
   const chairContour = orangeChairContour(image);
   const detect = await detector();
   // The indoor GPU detector receives the complete snapshot exactly as captured.
   const detections = await detect(image, { threshold: DETECTION_SCORE_MINIMUM });
   const detectedCats = detections
     .filter((detection) => detection.label.toLowerCase() === "cat")
-    .map((detection) => ({ source: "detector", score: detection.score, box: detection.box }));
-  const confidentDetections = detectedCats.filter((cat) => cat.score >= 0.8);
+    .map((detection) => ({
+      source: "detector",
+      score: detection.score,
+      box: detection.box,
+      orangeRatio: orangeRatio(image, detection.box, null),
+    }));
+  // The empty grey armchair can receive a high generic "cat" label. Our only
+  // indoor cat is orange, so colour is required before changing its state.
+  const confidentDetections = detectedCats.filter((cat) => (
+    cat.score >= 0.8 && cat.orangeRatio >= INDOOR_ORANGE_RATIO_MINIMUM
+  ));
 
-  // The hallway reference frames yield a 0.99 detector score.  Running the
-  // panoptic model as well for every 30-second poll doubled both memory and
-  // CPU for no added certainty.  Keep the contour model as a fallback for an
-  // ambiguous frame, where it actually provides independent evidence.
+  // The panoptic model is reserved for an ambiguous frame to avoid permanent CPU load.
   let segments = [];
   if (confidentDetections.length === 0) {
     segments = await (await segmenter())(image);
@@ -651,12 +634,15 @@ export async function recognizeAnyIndoorCat(imagePath) {
           score: segment.score,
           pixels: bounds?.pixels ?? 0,
           box: bounds?.box,
+          orangeRatio: bounds ? orangeRatio(image, bounds.box, segment.mask) : 0,
         };
       });
   }
   const confident = [
     ...confidentDetections,
-    ...segments.filter((cat) => cat.score >= 0.92 && cat.pixels >= 100),
+    ...segments.filter((cat) => (
+      cat.score >= 0.92 && cat.pixels >= 100 && cat.orangeRatio >= INDOOR_ORANGE_RATIO_MINIMUM
+    )),
   ];
   if (chairContour) confident.push(chairContour);
   const chairCats = confident.filter((cat) => {
