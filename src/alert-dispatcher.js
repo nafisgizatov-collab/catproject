@@ -346,12 +346,14 @@ async function processConfirmedDoorOpening(result, imagePath, record, now) {
 export async function processMotionEvent(
   imagePath,
   record,
-  { doorOpenedRecently = false, doorOpenedInExitWindow = false, doorContactOpenedRecently = false } = {},
+  { doorOpenedRecently = false, doorOpenedInExitWindow = false, doorContactOpenedRecently = false, forceFullAnalysis = false, allowEmptyFast = false } = {},
 ) {
   const result = await recognizeOrangeCat(imagePath, {
     allowDoorOrangeContour: doorContactOpenedRecently || doorOpenedInExitWindow,
+    analysisMode: forceFullAnalysis ? "full" : "adaptive",
+    allowEmptyFast,
   });
-  await record(`recognition accepted=${result.accepted} reason=${result.reason ?? "none"} details=${JSON.stringify(result)}`);
+  await record(`recognition analysis=${result.analysis} accepted=${result.accepted} reason=${result.reason ?? "none"} details=${JSON.stringify(result)}`);
   const now = Date.now();
 
   // A panoptic-only night contour is useful only as evidence that the known

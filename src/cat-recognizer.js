@@ -20,6 +20,10 @@ const DETECTION_SCORE_MINIMUM = numberConfig("CAT_DETECTION_SCORE_MINIMUM", 0.05
 // remains at 0.27 or above, so 0.20 rejects that background-colour false hit.
 const ORANGE_RATIO_MINIMUM = numberConfig("CAT_ORANGE_RATIO_MINIMUM", 0.2, { min: 0, max: 1 });
 const NIGHT_CAT_SCORE_MINIMUM = numberConfig("CAT_NIGHT_SCORE_MINIMUM", 0.5, { min: 0, max: 1 });
+const FAST_GPU_SCORE_MINIMUM = numberConfig("CAT_FAST_GPU_SCORE_MINIMUM", 0.9, { min: 0, max: 1 });
+const FAST_GPU_ORANGE_RATIO_MINIMUM = numberConfig("CAT_FAST_GPU_ORANGE_RATIO_MINIMUM", 0.18, { min: 0, max: 1 });
+const FAST_GPU_NIGHT_COLOURED_RATIO_MAXIMUM = numberConfig("CAT_FAST_GPU_NIGHT_COLOURED_RATIO_MAXIMUM", 0.12, { min: 0, max: 1 });
+const FAST_GPU_NEAR_DOOR_X = numberConfig("CAT_FAST_GPU_NEAR_DOOR_X", 0.42, { min: 0, max: 1 });
 const DETECTOR_DEVICE = config("CAT_DETECTOR_DEVICE", "cpu");
 const SEGMENTER_DEVICE = config("CAT_SEGMENTER_DEVICE", "cpu");
 let detectorPromise;
@@ -168,7 +172,10 @@ function orangeDoorContour(image) {
 }
 
 function isMasked(mask, x, y) {
-  if (!mask || x < 0 || y < 0 || x >= mask.width || y >= mask.height) return false;
+  // The fast GPU path has no panoptic mask. In that case colour is measured
+  // over the detector's bounding box; uncertain boxes fall back to CPU.
+  if (!mask) return true;
+  if (x < 0 || y < 0 || x >= mask.width || y >= mask.height) return false;
   return mask.data[(y * mask.width + x) * mask.channels] > 0;
 }
 
@@ -434,7 +441,7 @@ function boxesOverlap(first, second) {
   return intersection / Math.min(firstArea, secondArea) >= 0.5;
 }
 
-export async function recognizeOrangeCat(imagePath, { allowDoorOrangeContour = false } = {}) {
+export async function recognizeOrangeCat(imagePath, { allowDoorOrangeContour = false, analysisMode = "full", allowEmptyFast = false } = {}) {
   const decoded = jpeg.decode(await readFile(imagePath), { useTArray: true });
   const image = new RawImage(decoded.data, decoded.width, decoded.height, 4);
   const porch = cropToPorch(image);
@@ -446,7 +453,53 @@ export async function recognizeOrangeCat(imagePath, { allowDoorOrangeContour = f
   // camera region, preserving the original pixel geometry.
   const detections = await detect(porch, { threshold: DETECTION_SCORE_MINIMUM });
   const detectedCats = detections
-    .filter((detection) => detection.label.toLowerCase() === "cat")
+    .filter((detection) => detection.label.toLowerCase() === "cat");
+  const quickCats = detectedCats.map((detection) => ({
+    ...detection,
+    maskPixels: Math.max(0, (detection.box.xmax - detection.box.xmin) * (detection.box.ymax - detection.box.ymin)),
+    orangeRatio: orangeRatio(porch, detection.box, null),
+    silhouette: silhouetteColourProfile(porch, detection.box, null),
+    night: nightProfile(porch, detection.box, null),
+    orientation: orangeOrientation(porch, detection.box, null),
+    source: "gpu-detector",
+  }));
+  const isNightFrame = porchColours.colouredRatio < FAST_GPU_NIGHT_COLOURED_RATIO_MAXIMUM;
+  const isNearDoor = (cat) => ((cat.box.xmin + cat.box.xmax) / 2) >= porch.width * FAST_GPU_NEAR_DOOR_X;
+  const quickOrangeCat = quickCats.find((cat) => (
+    cat.score >= FAST_GPU_SCORE_MINIMUM
+      && cat.orangeRatio >= FAST_GPU_ORANGE_RATIO_MINIMUM
+      && !isNearDoor(cat)
+  ));
+  const needsCpuConfirmation = analysisMode === "full"
+    || Boolean(doorOrangeContour)
+    || isNightFrame
+    || (!allowEmptyFast && quickCats.length === 0)
+    || quickCats.some((cat) => (
+      cat.score < FAST_GPU_SCORE_MINIMUM
+        || cat.orangeRatio < FAST_GPU_ORANGE_RATIO_MINIMUM
+        || isNearDoor(cat)
+    ));
+  if (!needsCpuConfirmation) {
+    return {
+      accepted: Boolean(quickOrangeCat),
+      reason: quickOrangeCat ? "orange-cat" : null,
+      direction: quickOrangeCat?.orientation?.facesStreet ? "street" : "door",
+      analysis: "gpu-fast",
+      porchColours: Object.fromEntries(Object.entries(porchColours).map(([key, value]) => [key, Number(value.toFixed(3))])),
+      cats: quickCats.map((cat) => ({
+        score: Number(cat.score.toFixed(3)),
+        maskPixels: Math.round(cat.maskPixels),
+        orangeRatio: Number(cat.orangeRatio.toFixed(3)),
+        night: Object.fromEntries(Object.entries(cat.night).map(([key, value]) => [key, Number(value.toFixed(3))])),
+        orientation: cat.orientation && { facesStreet: cat.orientation.facesStreet, confidence: Number(cat.orientation.confidence.toFixed(3)) },
+        silhouette: Object.fromEntries(Object.entries(cat.silhouette).map(([key, value]) => [key, Number(value.toFixed(3))])),
+        box: cat.box,
+        source: cat.source,
+      })),
+      nightDoorCandidates: [],
+      people: detections.filter((detection) => detection.label.toLowerCase() === "person" && detection.score >= 0.6).map((person) => Number(person.score.toFixed(3))),
+    };
+  }
   // Do not make segmentation depend on the first object detector. At night it
   // can miss a small, illuminated cat entirely, while the panoptic model still
   // recognises the cat contour reliably.
@@ -526,6 +579,7 @@ export async function recognizeOrangeCat(imagePath, { allowDoorOrangeContour = f
   return {
     accepted: Boolean(reason),
     reason,
+    analysis: "full",
     direction: (orangeCat?.orientation?.facesStreet || doorOrangeContour) ? "street" : "door",
     porchColours: Object.fromEntries(
       Object.entries(porchColours).map(([key, value]) => [key, Number(value.toFixed(3))]),

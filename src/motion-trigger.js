@@ -74,6 +74,8 @@ let lastExternalDoorOpenedAt = 0;
 let lastExternalDoorClosedAt = 0;
 let lastContactDoorOpenAt = 0;
 let lastAppliedExternalDoorState = null;
+// A real contact event owns exactly one expensive outdoor confirmation.
+let pendingDoorConfirmation = false;
 
 function wait(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -142,7 +144,8 @@ async function applyExternalDoorEvent(now, jpegData) {
       lastDoorMotionAt = openedAt;
       lastDoorOpenAt = openedAt;
       lastContactDoorOpenAt = openedAt;
-      await record(`door opening confirmed by ${event.source ?? "external sensor"}`);
+      pendingDoorConfirmation = true;
+      await record(`door opening confirmed by ${event.source ?? "external sensor"}; one full outdoor confirmation queued`);
       try {
         await processDoorOpeningFromIndoorCamera(record);
       } catch (error) {
@@ -162,6 +165,7 @@ async function applyExternalDoorEvent(now, jpegData) {
         const eventName = `door-closed-${timestamp()}.jpg`;
         const eventPath = join(eventDirectory, eventName);
         await writeFile(eventPath, jpegData);
+        pendingDoorConfirmation = false;
         await record(`door closing confirmed by ${event.source ?? "external sensor"}; exterior image=${eventName}`);
         try {
           await reconcileAfterDoorClosed(eventPath, record);
@@ -212,7 +216,13 @@ async function poll() {
           doorOpenedRecently: now - lastDoorMotionAt <= settings.doorQuietPeriodMs,
           doorOpenedInExitWindow: now - lastDoorOpenAt <= settings.doorExitWindowMs,
           doorContactOpenedRecently: now - lastContactDoorOpenAt <= settings.doorQuietPeriodMs,
+          forceFullAnalysis: pendingDoorConfirmation,
+          allowEmptyFast: false,
         });
+        if (pendingDoorConfirmation) {
+          pendingDoorConfirmation = false;
+          await record("door opening full outdoor confirmation completed");
+        }
         lastPresenceCheckAt = Date.now();
         lastEventAt = lastPresenceCheckAt;
       } catch (error) {
@@ -234,7 +244,13 @@ async function poll() {
           doorOpenedRecently: now - lastDoorMotionAt <= settings.doorQuietPeriodMs,
           doorOpenedInExitWindow: now - lastDoorOpenAt <= settings.doorExitWindowMs,
           doorContactOpenedRecently: now - lastContactDoorOpenAt <= settings.doorQuietPeriodMs,
+          forceFullAnalysis: pendingDoorConfirmation,
+          allowEmptyFast: !inContactWindow && !pendingDoorConfirmation,
       });
+      if (pendingDoorConfirmation) {
+        pendingDoorConfirmation = false;
+        await record("door opening full outdoor confirmation completed");
+      }
     } catch (error) {
       await record(`presence processing failed error=${error.message}`);
     }
