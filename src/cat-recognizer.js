@@ -22,8 +22,6 @@ const ORANGE_RATIO_MINIMUM = numberConfig("CAT_ORANGE_RATIO_MINIMUM", 0.2, { min
 const NIGHT_CAT_SCORE_MINIMUM = numberConfig("CAT_NIGHT_SCORE_MINIMUM", 0.5, { min: 0, max: 1 });
 const DETECTOR_DEVICE = config("CAT_DETECTOR_DEVICE", "cpu");
 const SEGMENTER_DEVICE = config("CAT_SEGMENTER_DEVICE", "cpu");
-const GPU_INPUT_WIDTH = numberConfig("CAT_GPU_INPUT_WIDTH", 1333, { min: 64, max: 4096 });
-const GPU_INPUT_HEIGHT = numberConfig("CAT_GPU_INPUT_HEIGHT", 800, { min: 64, max: 4096 });
 let detectorPromise;
 let segmenterPromise;
 
@@ -43,53 +41,6 @@ function modelOptions(device) {
       enableMemPattern: booleanConfig("CAT_ONNX_MEM_PATTERN", false),
     },
   };
-}
-
-function fixedGpuImage(image, device) {
-  if (device !== "dml") {
-    return { image, offsetX: 0, offsetY: 0, sourceScale: 1, originalWidth: image.width, originalHeight: image.height };
-  }
-  // DirectML needs a stable tensor shape. Letterbox instead of stretching: a
-  // cat keeps its natural silhouette and black padding cannot resemble it.
-  const data = new Uint8Array(GPU_INPUT_WIDTH * GPU_INPUT_HEIGHT * image.channels);
-  const sourceScale = Math.min(GPU_INPUT_WIDTH / image.width, GPU_INPUT_HEIGHT / image.height);
-  const drawnWidth = Math.max(1, Math.round(image.width * sourceScale));
-  const drawnHeight = Math.max(1, Math.round(image.height * sourceScale));
-  const offsetX = Math.floor((GPU_INPUT_WIDTH - drawnWidth) / 2);
-  const offsetY = Math.floor((GPU_INPUT_HEIGHT - drawnHeight) / 2);
-  for (let y = 0; y < drawnHeight; y += 1) {
-    const sourceY = Math.min(image.height - 1, Math.floor(y / sourceScale));
-    for (let x = 0; x < drawnWidth; x += 1) {
-      const sourceX = Math.min(image.width - 1, Math.floor(x / sourceScale));
-      const source = (sourceY * image.width + sourceX) * image.channels;
-      const target = ((y + offsetY) * GPU_INPUT_WIDTH + x + offsetX) * image.channels;
-      for (let channel = 0; channel < image.channels; channel += 1) data[target + channel] = image.data[source + channel];
-    }
-  }
-  return {
-    image: new RawImage(data, GPU_INPUT_WIDTH, GPU_INPUT_HEIGHT, image.channels),
-    offsetX,
-    offsetY,
-    sourceScale,
-    originalWidth: image.width,
-    originalHeight: image.height,
-  };
-}
-
-function originalBox(box, transform) {
-  if (transform.sourceScale === 1) return box;
-  const toOriginalX = (x) => Math.max(0, Math.min(transform.originalWidth, (x - transform.offsetX) / transform.sourceScale));
-  const toOriginalY = (y) => Math.max(0, Math.min(transform.originalHeight, (y - transform.offsetY) / transform.sourceScale));
-  return {
-    xmin: toOriginalX(box.xmin),
-    ymin: toOriginalY(box.ymin),
-    xmax: toOriginalX(box.xmax),
-    ymax: toOriginalY(box.ymax),
-  };
-}
-
-function restoreDetections(detections, transform) {
-  return detections.map((detection) => ({ ...detection, box: originalBox(detection.box, transform) }));
 }
 
 function rgbToHsv(red, green, blue) {
@@ -489,14 +440,11 @@ export async function recognizeOrangeCat(imagePath, { allowDoorOrangeContour = f
   const porch = cropToPorch(image);
   const porchColours = porchColourMetrics(porch);
   const doorOrangeContour = allowDoorOrangeContour ? orangeDoorContour(porch) : null;
-  const porchInference = fixedGpuImage(porch, DETECTOR_DEVICE);
   const detect = await detector();
   // Keep weak candidates for calibration. The higher acceptance threshold below
-  // still decides whether an alert is allowed.
-  const detections = restoreDetections(
-    await detect(porchInference.image, { threshold: DETECTION_SCORE_MINIMUM }),
-    porchInference,
-  );
+  // still decides whether an alert is allowed. DirectML accepts this unscaled
+  // camera region, preserving the original pixel geometry.
+  const detections = await detect(porch, { threshold: DETECTION_SCORE_MINIMUM });
   const detectedCats = detections
     .filter((detection) => detection.label.toLowerCase() === "cat")
   // Do not make segmentation depend on the first object detector. At night it
@@ -625,12 +573,9 @@ export async function recognizeAnyIndoorCat(imagePath) {
   // Transformers preprocessing may reuse the image buffer, so preserve this
   // colour-contour measurement before handing the image to either model.
   const chairContour = orangeChairContour(image);
-  const indoorInference = fixedGpuImage(image, DETECTOR_DEVICE);
   const detect = await detector();
-  const detections = restoreDetections(
-    await detect(indoorInference.image, { threshold: DETECTION_SCORE_MINIMUM }),
-    indoorInference,
-  );
+  // The indoor GPU detector receives the complete snapshot exactly as captured.
+  const detections = await detect(image, { threshold: DETECTION_SCORE_MINIMUM });
   const detectedCats = detections
     .filter((detection) => detection.label.toLowerCase() === "cat")
     .map((detection) => ({ source: "detector", score: detection.score, box: detection.box }));
