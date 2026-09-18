@@ -7,6 +7,8 @@ const projectRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const runtime = join(projectRoot, "runtime");
 const envPath = join(projectRoot, ".env");
 const eventPath = join(runtime, "yandex-door-event.json");
+const indoorSnapshotUrl = config("CAT_INDOOR_SNAPSHOT_URL", "http://127.0.0.1:1984/api/frame.jpeg?src=in");
+const indoorOpeningCaptureTimeoutMs = numberConfig("CAT_DOOR_OPENING_INDOOR_CAPTURE_TIMEOUT_MS", 3_000, { min: 1_000, max: 15_000 });
 const devicePath = join(runtime, "yandex-door-device.json");
 const logPath = join(runtime, "yandex-door-monitor.log");
 const apiRoot = "https://api.iot.yandex.net/v1.0";
@@ -56,6 +58,7 @@ async function readDoorState() {
       state: saved.state ?? saved.type ?? null,
       lastOpenedAt: Number(saved.lastOpenedAt ?? (saved.type === "opened" ? saved.at : 0)) || 0,
       lastClosedAt: Number(saved.lastClosedAt ?? (saved.type === "closed" ? saved.at : 0)) || 0,
+      indoorOpeningImagePath: saved.indoorOpeningImagePath ?? null,
     };
   } catch (error) {
     if (error.code === "ENOENT") return { state: null, lastOpenedAt: 0, lastClosedAt: 0 };
@@ -63,14 +66,30 @@ async function readDoorState() {
   }
 }
 
-async function saveDoorState(state, lastOpenedAt, lastClosedAt) {
+async function saveDoorState(state, lastOpenedAt, lastClosedAt, indoorOpeningImagePath) {
   await writeFile(eventPath, `${JSON.stringify({
     source: "yandex",
     state,
     lastOpenedAt,
     lastClosedAt,
+    indoorOpeningImagePath: indoorOpeningImagePath ?? null,
     updatedAt: Date.now(),
   }, null, 2)}\n`);
+}
+
+async function captureIndoorOpeningFrame() {
+  if (!indoorSnapshotUrl) return null;
+  try {
+    const response = await fetch(indoorSnapshotUrl, { signal: AbortSignal.timeout(indoorOpeningCaptureTimeoutMs) });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const imagePath = join(runtime, `door-opening-indoor-${new Date().toISOString().replace(/[:.]/g, "-")}.jpg`);
+    await writeFile(imagePath, Buffer.from(await response.arrayBuffer()));
+    await log(`indoor opening frame captured image=${imagePath.split(/[\\/]/).pop()}`);
+    return imagePath;
+  } catch (error) {
+    await log(`indoor opening frame unavailable error=${error.message}`);
+    return null;
+  }
 }
 
 await mkdir(runtime, { recursive: true });
@@ -98,6 +117,7 @@ const persisted = await readDoorState();
 let previousState = null;
 let lastOpenedAt = persisted.lastOpenedAt;
 let lastClosedAt = persisted.lastClosedAt;
+let indoorOpeningImagePath = persisted.indoorOpeningImagePath;
 await log(`started interval=${intervalMs}ms`);
 while (true) {
   try {
@@ -110,14 +130,16 @@ while (true) {
       previousState = state;
       // A process restart must not invent an opening or closing event. Keep
       // the existing transition times and record only the observed baseline.
-      await saveDoorState(state, lastOpenedAt, lastClosedAt);
+      await saveDoorState(state, lastOpenedAt, lastClosedAt, indoorOpeningImagePath);
       await log(`initial state=${state}`);
     } else if (state !== previousState) {
       await log(`door state ${previousState} -> ${state}`);
       const changedAt = Date.now();
-      if (state === "opened") lastOpenedAt = changedAt;
-      else lastClosedAt = changedAt;
-      await saveDoorState(state, lastOpenedAt, lastClosedAt);
+       if (state === "opened") {
+         lastOpenedAt = changedAt;
+         indoorOpeningImagePath = await captureIndoorOpeningFrame();
+       } else lastClosedAt = changedAt;
+       await saveDoorState(state, lastOpenedAt, lastClosedAt, indoorOpeningImagePath);
       previousState = state;
     }
   } catch (error) {

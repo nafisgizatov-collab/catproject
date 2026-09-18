@@ -147,7 +147,7 @@ async function applyExternalDoorEvent(now, jpegData) {
       pendingDoorConfirmation = true;
       await record(`door opening confirmed by ${event.source ?? "external sensor"}; one full outdoor confirmation queued`);
       try {
-        await processDoorOpeningFromIndoorCamera(record);
+        await processDoorOpeningFromIndoorCamera(record, event.indoorOpeningImagePath ?? null);
       } catch (error) {
         await record(`indoor opening snapshot failed error=${error.message}`);
       }

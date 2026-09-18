@@ -209,8 +209,8 @@ async function announceExit(state, record) {
 // already waiting at the inside threshold is the household's explicit signal
 // that this opening is an exit, so commit the state before he can cross the
 // exterior camera's field of view.
-export async function processDoorOpeningFromIndoorCamera(record) {
-  const indoor = await observeIndoorCat();
+export async function processDoorOpeningFromIndoorCamera(record, openingImagePath = null) {
+  const indoor = openingImagePath ? await recognizeIndoorFrame(openingImagePath) : await observeIndoorCat();
   if (indoor.error) {
     await record(`indoor opening snapshot skipped error=${indoor.error}`);
     return { observed: false, error: indoor.error };
