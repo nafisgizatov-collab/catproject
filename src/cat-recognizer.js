@@ -20,6 +20,7 @@ const DETECTION_SCORE_MINIMUM = numberConfig("CAT_DETECTION_SCORE_MINIMUM", 0.05
 // remains at 0.27 or above, so 0.20 rejects that background-colour false hit.
 const ORANGE_RATIO_MINIMUM = numberConfig("CAT_ORANGE_RATIO_MINIMUM", 0.2, { min: 0, max: 1 });
 const NIGHT_CAT_SCORE_MINIMUM = numberConfig("CAT_NIGHT_SCORE_MINIMUM", 0.5, { min: 0, max: 1 });
+const NIGHT_HEURISTICS_ENABLED = booleanConfig("CAT_NIGHT_HEURISTICS_ENABLED", true);
 const FAST_GPU_SCORE_MINIMUM = numberConfig("CAT_FAST_GPU_SCORE_MINIMUM", 0.9, { min: 0, max: 1 });
 const FAST_GPU_ORANGE_RATIO_MINIMUM = numberConfig("CAT_FAST_GPU_ORANGE_RATIO_MINIMUM", 0.18, { min: 0, max: 1 });
 const FAST_GPU_NIGHT_COLOURED_RATIO_MAXIMUM = numberConfig("CAT_FAST_GPU_NIGHT_COLOURED_RATIO_MAXIMUM", 0.12, { min: 0, max: 1 });
@@ -537,18 +538,18 @@ export async function recognizeOrangeCat(imagePath, { allowDoorOrangeContour = f
       || (cat.score >= STRONG_ORANGE_CAT_SCORE_MINIMUM && cat.orangeRatio >= STRONG_ORANGE_RATIO_MINIMUM)
     )
   ));
-  const nightCat = porchColours.colouredRatio < 0.12
+  const nightCat = NIGHT_HEURISTICS_ENABLED && porchColours.colouredRatio < 0.12
     && cats.find(
       (cat) => cat.maskPixels >= 50 && cat.score >= NIGHT_CAT_SCORE_MINIMUM
         && cat.night.mean >= 115
         && cat.night.darkRatio <= 0.35,
     );
-  const nightDoorCat = (porchColours.colouredRatio < 0.4 && nightDoorCandidates[0])
+  const nightDoorCat = NIGHT_HEURISTICS_ENABLED && ((porchColours.colouredRatio < 0.4 && nightDoorCandidates[0])
     // The neighbour's grey-and-white IR silhouette is almost entirely neutral
     // dark (0.874 in the reference). The illuminated home cat is distinctly
     // lighter (0.555). This keeps panoptic-only night detection useful without
     // letting the neighbour through a real door event.
-    || cats.find((cat) => cat.score >= 0.9 && cat.silhouette.neutralDarkRatio <= 0.7);
+    || cats.find((cat) => cat.score >= 0.9 && cat.silhouette.neutralDarkRatio <= 0.7));
   const reason = orangeCat ? "orange-cat"
     : doorOrangeContour ? "orange-door-contour"
     : nightCat ? "night-probable-home-cat"
