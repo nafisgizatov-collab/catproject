@@ -52,6 +52,8 @@ export async function startDoorEventIngress() {
   await mkdir(runtimePath, { recursive: true });
   let lastState = null;
   let lastEventAt = 0;
+  let lastOpenedAt = 0;
+  let lastClosedAt = 0;
 
   const server = createServer(async (request, response) => {
     if (request.method !== "POST" || request.url !== "/api/door-event") {
@@ -76,13 +78,9 @@ export async function startDoorEventIngress() {
       }
       lastState = state;
       lastEventAt = now;
-      const event = {
-        source: "esp-relay",
-        state,
-        lastOpenedAt: state === "opened" ? now : 0,
-        lastClosedAt: state === "closed" ? now : 0,
-        updatedAt: now,
-      };
+      if (state === "opened") lastOpenedAt = now;
+      else lastClosedAt = now;
+      const event = { source: "esp-relay", state, lastOpenedAt, lastClosedAt, updatedAt: now };
       await writeFile(eventPath, `${JSON.stringify(event, null, 2)}\n`);
       await log(`accepted state=${state} remote=${request.socket.remoteAddress ?? "unknown"}`);
       send(response, 202, { ok: true, acceptedAt: now });

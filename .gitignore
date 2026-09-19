@@ -7,3 +7,5 @@ node_modules/
 data/
 esp/secrets.yaml
 __pycache__/
+
+esp32-door-relay/secrets.h
